@@ -25,12 +25,14 @@ import (
 	"sigs.k8s.io/yaml"
 
 	"github.com/argoproj/argo-rollouts/pkg/apiclient/rollout"
+	"github.com/argoproj/argo-rollouts/pkg/apis/rollouts/v1alpha1"
 	rov1 "github.com/argoproj/argo-rollouts/pkg/apis/rollouts/v1alpha1"
 	"github.com/argoproj/argo-rollouts/pkg/kubectl-argo-rollouts/cmd/abort"
 	"github.com/argoproj/argo-rollouts/pkg/kubectl-argo-rollouts/cmd/promote"
 	"github.com/argoproj/argo-rollouts/pkg/kubectl-argo-rollouts/cmd/restart"
 	"github.com/argoproj/argo-rollouts/pkg/kubectl-argo-rollouts/cmd/retry"
 	"github.com/argoproj/argo-rollouts/pkg/kubectl-argo-rollouts/cmd/status"
+	"github.com/argoproj/argo-rollouts/pkg/kubectl-argo-rollouts/cmd/undo"
 	"github.com/argoproj/argo-rollouts/pkg/kubectl-argo-rollouts/options"
 	"github.com/argoproj/argo-rollouts/pkg/kubectl-argo-rollouts/viewcontroller"
 	rolloututil "github.com/argoproj/argo-rollouts/utils/rollout"
@@ -182,6 +184,16 @@ func (w *When) RetryRollout() *When {
 	_, err := retry.RetryRollout(w.rolloutClient.ArgoprojV1alpha1().Rollouts(w.namespace), w.rollout.GetName())
 	w.CheckError(err)
 	w.log.Info("Retried rollout")
+	return w
+}
+
+func (w *When) UndoRollout(toRevision int64) *When {
+	if w.rollout == nil {
+		w.t.Fatal("Rollout not set")
+	}
+	_, err := undo.RunUndoRollout(w.dynamicClient.Resource(v1alpha1.RolloutGVR).Namespace(w.namespace), w.kubeClient, w.rollout.GetName(), toRevision)
+	w.CheckError(err)
+	w.log.Infof("Undo rollout to %d", toRevision)
 	return w
 }
 
@@ -401,6 +413,18 @@ func (w *When) WaitForActiveRevision(revision string, timeout ...time.Duration) 
 		return ro.Status.BlueGreen.ActiveSelector == rs.Labels[rov1.DefaultRolloutUniqueLabelKey]
 	}
 	return w.WaitForRolloutCondition(checkStatus, fmt.Sprintf("active revision=%s", revision), timeout...)
+}
+
+func (w *When) WaitForRolloutStepPluginRunning(timeout ...time.Duration) *When {
+	checkStatus := func(ro *rov1.Rollout) bool {
+		for _, s := range ro.Status.Canary.StepPluginStatuses {
+			if s.Index == *ro.Status.CurrentStepIndex && s.Operation == rov1.StepPluginOperationRun && s.Phase == v1alpha1.StepPluginPhaseRunning {
+				return true
+			}
+		}
+		return false
+	}
+	return w.WaitForRolloutCondition(checkStatus, fmt.Sprintf("stepPluginStatus[currentIndex].phase=Running"), timeout...)
 }
 
 func (w *When) WaitForRolloutCondition(test func(ro *rov1.Rollout) bool, condition string, timeouts ...time.Duration) *When {

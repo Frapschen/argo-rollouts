@@ -1,6 +1,7 @@
 package rollout
 
 import (
+	"fmt"
 	"math"
 	"sort"
 
@@ -20,9 +21,9 @@ func (c *rolloutContext) rolloutBlueGreen() error {
 	if err != nil {
 		return err
 	}
-	c.newRS, err = c.getAllReplicaSetsAndSyncRevision(true)
+	c.newRS, err = c.getAllReplicaSetsAndSyncRevision()
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to getAllReplicaSetsAndSyncRevision in rolloutBlueGreen create true: %w", err)
 	}
 
 	// This must happen right after the new replicaset is created
@@ -70,18 +71,17 @@ func (c *rolloutContext) rolloutBlueGreen() error {
 	return c.syncRolloutStatusBlueGreen(previewSvc, activeSvc)
 }
 
-func (c *rolloutContext) reconcileBlueGreenStableReplicaSet(activeSvc *corev1.Service) error {
-	if _, ok := activeSvc.Spec.Selector[v1alpha1.DefaultRolloutUniqueLabelKey]; !ok {
-		return nil
-	}
-	activeRS, _ := replicasetutil.GetReplicaSetByTemplateHash(c.allRSs, activeSvc.Spec.Selector[v1alpha1.DefaultRolloutUniqueLabelKey])
-	if activeRS == nil {
-		c.log.Warn("There shouldn't be a nil active replicaset if the active Service selector is set")
+func (c *rolloutContext) reconcileBlueGreenStableReplicaSet() error {
+	if c.stableRS == nil {
+		c.log.Info("Stable ReplicaSet doesn't exist and hence no reconciliation is required.")
 		return nil
 	}
 
-	c.log.Infof("Reconciling stable ReplicaSet '%s'", activeRS.Name)
-	_, _, err := c.scaleReplicaSetAndRecordEvent(activeRS, defaults.GetReplicasOrDefault(c.rollout.Spec.Replicas))
+	c.log.Infof("Reconciling stable ReplicaSet '%s'", c.stableRS.Name)
+	_, _, err := c.scaleReplicaSetAndRecordEvent(c.stableRS, defaults.GetReplicasOrDefault(c.rollout.Spec.Replicas))
+	if err != nil {
+		return fmt.Errorf("failed to scaleReplicaSetAndRecordEvent in reconcileBlueGreenStableReplicaSet: %w", err)
+	}
 	return err
 }
 
@@ -90,7 +90,7 @@ func (c *rolloutContext) reconcileBlueGreenReplicaSets(activeSvc *corev1.Service
 	if err != nil {
 		return err
 	}
-	err = c.reconcileBlueGreenStableReplicaSet(activeSvc)
+	err = c.reconcileBlueGreenStableReplicaSet()
 	if err != nil {
 		return err
 	}
@@ -220,10 +220,9 @@ func (c *rolloutContext) scaleDownOldReplicaSetsForBlueGreen(oldRSs []*appsv1.Re
 	annotationedRSs := int32(0)
 	rolloutReplicas := defaults.GetReplicasOrDefault(c.rollout.Spec.Replicas)
 	for _, targetRS := range oldRSs {
-		if replicasetutil.IsStillReferenced(c.rollout.Status, targetRS) {
-			// We should technically never get here because we shouldn't be passing a replicaset list
-			// which includes referenced ReplicaSets. But we check just in case
-			c.log.Warnf("Prevented inadvertent scaleDown of RS '%s'", targetRS.Name)
+		if c.isReplicaSetReferenced(targetRS) {
+			// We might get here if user interrupted an an update in order to move back to stable.
+			c.log.Infof("Skip scale down of older RS '%s': still referenced", targetRS.Name)
 			continue
 		}
 		if *targetRS.Spec.Replicas == 0 {
@@ -244,7 +243,7 @@ func (c *rolloutContext) scaleDownOldReplicaSetsForBlueGreen(oldRSs []*appsv1.Re
 		// Scale down.
 		_, _, err = c.scaleReplicaSetAndRecordEvent(targetRS, desiredReplicaCount)
 		if err != nil {
-			return false, err
+			return false, fmt.Errorf("failed to scaleReplicaSetAndRecordEvent in scaleDownOldReplicaSetsForBlueGreen: %w", err)
 		}
 		hasScaled = true
 	}

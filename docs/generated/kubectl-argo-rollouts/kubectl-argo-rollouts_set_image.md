@@ -13,8 +13,11 @@ kubectl argo rollouts set image ROLLOUT_NAME CONTAINER=IMAGE [flags]
 ## Examples
 
 ```shell
-# Set rollout image
-kubectl argo rollouts set image my-rollout www=image:v2
+# Set rollout image (containers contains 'initContainer', 'container', 'ephemeralContainer')
+kubectl argo rollouts set image my-rollout containerName=imageName
+
+# Set rollout image for all containers
+kubectl argo rollouts set image my-rollout *=imageName
 ```
 
 ## Options
@@ -35,6 +38,7 @@ kubectl argo rollouts set image my-rollout www=image:v2
       --client-key string              Path to a client key file for TLS
       --cluster string                 The name of the kubeconfig cluster to use
       --context string                 The name of the kubeconfig context to use
+      --disable-compression            If true, opt-out of response compression for all requests to the server
       --insecure-skip-tls-verify       If true, the server's certificate will not be checked for validity. This will make your HTTPS connections insecure
   -v, --kloglevel int                  Log level for kubernetes client library
       --kubeconfig string              Path to the kubeconfig file to use for CLI requests.

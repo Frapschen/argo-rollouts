@@ -91,26 +91,26 @@ spec:
 		ExpectRevisionPodCount("2", 1).
 		ExpectRolloutEvents([]string{
 			"RolloutAddedToInformer", // Rollout added to informer cache
-			"RolloutNotCompleted",    // Rollout not completed, started update to revision 0 (7fd9b5545c)
 			"RolloutUpdated",         // Rollout updated to revision 1
 			"NewReplicaSetCreated",   // Created ReplicaSet abort-retry-promote-698fbfb9dc (revision 1)
+			"RolloutNotCompleted",    // Rollout not completed, started update to revision 2 (7fd9b5545c)
 			"ScalingReplicaSet",      // Scaled up ReplicaSet abort-retry-promote-698fbfb9dc (revision 1) from 0 to 1
 			"RolloutCompleted",       // Rollout completed update to revision 1 (698fbfb9dc): Initial deploy
-			"RolloutNotCompleted",
-			"RolloutUpdated",       // Rollout updated to revision 2
-			"NewReplicaSetCreated", // Created ReplicaSet abort-retry-promote-75dcb5ddd6 (revision 2)
-			"ScalingReplicaSet",    // Scaled up ReplicaSet abort-retry-promote-75dcb5ddd6 (revision 2) from 0 to 1
-			"RolloutStepCompleted", // Rollout step 1/2 completed (setWeight: 50)
-			"RolloutPaused",        // Rollout is paused (CanaryPauseStep)
-			"ScalingReplicaSet",    // Scaled down ReplicaSet abort-retry-promote-75dcb5ddd6 (revision 2) from 1 to 0
-			"RolloutAborted",       // Rollout aborted update to revision 2
-			"ScalingReplicaSet",    // Scaled up ReplicaSet abort-retry-promote-75dcb5ddd6 (revision 2) from 0 to 1
-			"RolloutStepCompleted", // Rollout step 1/2 completed (setWeight: 50)
-			"RolloutPaused",        // Rollout is paused (CanaryPauseStep)
-			"RolloutStepCompleted", // Rollout step 2/2 completed (pause: 3s)
-			"RolloutResumed",       // Rollout is resumed
-			"ScalingReplicaSet",    // Scaled down ReplicaSet abort-retry-promote-698fbfb9dc (revision 1) from 1 to 0
-			"RolloutCompleted",     // Rollout completed update to revision 2 (75dcb5ddd6): Completed all 2 canary steps
+			"RolloutUpdated",         // Rollout updated to revision 2
+			"NewReplicaSetCreated",   // Created ReplicaSet abort-retry-promote-75dcb5ddd6 (revision 2)
+			"RolloutNotCompleted",    // Rollout not completed, started update to revision 3 (5bb7978cd)
+			"ScalingReplicaSet",      // Scaled up ReplicaSet abort-retry-promote-75dcb5ddd6 (revision 2) from 0 to 1
+			"RolloutStepCompleted",   // Rollout step 1/2 completed (setWeight: 50)
+			"RolloutPaused",          // Rollout is paused (CanaryPauseStep)
+			"ScalingReplicaSet",      // Scaled down ReplicaSet abort-retry-promote-75dcb5ddd6 (revision 2) from 1 to 0
+			"RolloutAborted",         // Rollout aborted update to revision 2
+			"ScalingReplicaSet",      // Scaled up ReplicaSet abort-retry-promote-75dcb5ddd6 (revision 2) from 0 to 1
+			"RolloutStepCompleted",   // Rollout step 1/2 completed (setWeight: 50)
+			"RolloutPaused",          // Rollout is paused (CanaryPauseStep)
+			"RolloutStepCompleted",   // Rollout step 2/2 completed (pause: 3s)
+			"RolloutResumed",         // Rollout is resumed
+			"ScalingReplicaSet",      // Scaled down ReplicaSet abort-retry-promote-698fbfb9dc (revision 1) from 1 to 0
+			"RolloutCompleted",       // Rollout completed update to revision 2 (75dcb5ddd6): Completed all 2 canary steps
 		})
 }
 
@@ -166,13 +166,14 @@ spec:
 		UpdateSpec().
 		WaitForRolloutStatus("Paused"). // At step 1 (pause: {duration: 24h})
 		PromoteRollout().
-		Sleep(2*time.Second).
+		Sleep(3*time.Second).
+		WaitForInlineAnalysisRunPhase("Running").
 		Then().
+		ExpectRolloutStatus("Progressing"). // At step 2 (analysis: sleep-job - 24h)
+		ExpectAnalysisRunCount(1).
 		ExpectRollout("status.currentStepIndex == 1", func(r *v1alpha1.Rollout) bool {
 			return *r.Status.CurrentStepIndex == 1
 		}).
-		ExpectRolloutStatus("Progressing"). // At step 2 (analysis: sleep-job - 24h)
-		ExpectAnalysisRunCount(1).
 		When().
 		PromoteRollout().
 		Sleep(2 * time.Second).
@@ -205,6 +206,9 @@ spec:
       prePromotionAnalysis:
         templates:
         - templateName: sleep-job
+        args:
+        - name: duration
+          value: "10"
       postPromotionAnalysis:
         templates:
         - templateName: sleep-job
@@ -228,11 +232,12 @@ spec:
 		ApplyManifests().
 		WaitForRolloutStatus("Healthy").
 		UpdateSpec().
-		Sleep(time.Second).
+		Sleep(5 * time.Second).
+		WaitForPrePromotionAnalysisRunPhase("Running").
 		PromoteRolloutFull().
 		WaitForRolloutStatus("Healthy").
 		Then().
-		ExpectAnalysisRunCount(0)
+		ExpectAnalysisRunCount(1)
 }
 
 func (s *FunctionalSuite) TestRolloutRestart() {
@@ -1442,4 +1447,230 @@ spec:
 		WatchRolloutStatus("Healthy").
 		Then().
 		ExpectRolloutStatus("Healthy"))
+}
+
+func (s *FunctionalSuite) TestScaleDownOnSuccess() {
+	s.Given().
+		RolloutObjects(`
+kind: Service
+apiVersion: v1
+metadata:
+  name: rollout-bluegreen-active
+spec:
+  selector:
+    app: rollout-ref-deployment
+  ports:
+  - protocol: TCP
+    port: 80
+    targetPort: 8080
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata:
+  name: rollout-ref-deployment
+spec:
+  replicas: 2
+  workloadRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: rollout-ref-deployment
+    scaleDown: onsuccess
+  strategy:
+    blueGreen:
+      activeService: rollout-bluegreen-active
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rollout-ref-deployment
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: rollout-ref-deployment
+  template:
+    metadata:
+      labels:
+        app: rollout-ref-deployment
+    spec:
+      containers:
+        - name: rollouts-demo
+          image: argoproj/rollouts-demo:green
+`).
+		When().
+		ApplyManifests().
+		WaitForRolloutStatus("Healthy").
+		Then().
+		ExpectDeploymentReplicasCount("The deployment has been scaled to 0 replicas", "rollout-ref-deployment", 0)
+}
+
+func (s *FunctionalSuite) TestScaleDownProgressively() {
+	s.Given().
+		RolloutObjects(`
+kind: Service
+apiVersion: v1
+metadata:
+  name: rollout-bluegreen-active
+spec:
+  selector:
+    app: rollout-ref-deployment
+  ports:
+  - protocol: TCP
+    port: 80
+    targetPort: 8080
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata:
+  name: rollout-ref-deployment
+spec:
+  replicas: 2
+  workloadRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: rollout-ref-deployment
+    scaleDown: progressively
+  strategy:
+    blueGreen:
+      activeService: rollout-bluegreen-active
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rollout-ref-deployment
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: rollout-ref-deployment
+  template:
+    metadata:
+      labels:
+        app: rollout-ref-deployment
+    spec:
+      containers:
+        - name: rollouts-demo
+          image: argoproj/rollouts-demo:green
+`).
+		When().
+		ApplyManifests().
+		WaitForRolloutStatus("Healthy").
+		Then().
+		ExpectDeploymentReplicasCount("The deployment has been scaled to 0 replicas", "rollout-ref-deployment", 0)
+}
+
+func (s *FunctionalSuite) TestNeverScaleDown() {
+	s.Given().
+		RolloutObjects(`
+kind: Service
+apiVersion: v1
+metadata:
+  name: rollout-bluegreen-active
+  annotations:
+    rollout.argoproj.io/scale-down: never
+spec:
+  selector:
+    app: rollout-ref-deployment
+  ports:
+  - protocol: TCP
+    port: 80
+    targetPort: 8080
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata:
+  name: rollout-ref-deployment
+spec:
+  replicas: 2
+  workloadRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: rollout-ref-deployment
+    scaleDown: never
+  strategy:
+    blueGreen:
+      activeService: rollout-bluegreen-active
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rollout-ref-deployment
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: rollout-ref-deployment
+  template:
+    metadata:
+      labels:
+        app: rollout-ref-deployment
+    spec:
+      containers:
+        - name: rollouts-demo
+          image: argoproj/rollouts-demo:green
+`).
+		When().
+		ApplyManifests().
+		WaitForRolloutStatus("Healthy").
+		Then().
+		ExpectDeploymentReplicasCount("The deployment has not been scaled", "rollout-ref-deployment", 2)
+}
+
+func (s *FunctionalSuite) TestSpecAndReplicaChangeSameTime() {
+	s.Given().
+		HealthyRollout(`
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata:
+  name: canary-change-same-time
+spec:
+  replicas: 2
+  strategy:
+    canary:
+      steps:
+      - setWeight: 10
+      - pause: {duration: 10s}
+      - setWeight: 20
+      - pause: {duration: 5s}
+  selector:
+    matchLabels:
+      app: canary-change-same-time
+  template:
+    metadata:
+      labels:
+        app: canary-change-same-time
+    spec:
+      containers:
+      - name: canary-change-same-time
+        image: nginx:1.19-alpine
+        resources:
+          requests:
+            memory: 16Mi
+            cpu: 1m
+`).
+		When().
+		WaitForRolloutStatus("Healthy").
+		PatchSpec(`
+spec:
+  replicas: 3
+  template:
+    spec:
+      containers:
+      - name: canary-change-same-time
+        env:
+          - name: TEST
+            value: test`).
+		WaitForRolloutStatus("Paused").
+		PatchSpec(`
+spec:
+  replicas: 4
+  template:
+    spec:
+      containers:
+      - name: canary-change-same-time
+        env:
+          - name: TEST
+            value: test-new`).
+		WaitForRolloutStatus("Healthy").Then().
+		ExpectReplicaCounts(4, 4, 4, 4, 4)
 }
