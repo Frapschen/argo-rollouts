@@ -2,7 +2,7 @@ apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   annotations:
-    controller-gen.kubebuilder.io/version: v0.12.1
+    controller-gen.kubebuilder.io/version: v0.14.0
   name: rollouts.argoproj.io
 spec:
   group: argoproj.io
@@ -109,6 +109,9 @@ spec:
                     type: object
                 type: object
                 x-kubernetes-map-type: atomic
+                x-kubernetes-validations:
+                - message: .spec.selector is immutable
+                  rule: self == oldSelf
               strategy:
                 properties:
                   blueGreen:
@@ -571,6 +574,26 @@ spec:
                                     - templateName
                                     type: object
                                   type: array
+                                analysisRunMetadata:
+                                  properties:
+                                    annotations:
+                                      additionalProperties:
+                                        type: string
+                                      type: object
+                                    labels:
+                                      additionalProperties:
+                                        type: string
+                                      type: object
+                                  type: object
+                                dryRun:
+                                  items:
+                                    properties:
+                                      metricName:
+                                        type: string
+                                    required:
+                                    - metricName
+                                    type: object
+                                  type: array
                                 duration:
                                   type: string
                                 templates:
@@ -641,6 +664,16 @@ spec:
                                   - type: integer
                                   - type: string
                                   x-kubernetes-int-or-string: true
+                              type: object
+                            plugin:
+                              properties:
+                                config:
+                                  type: object
+                                  x-kubernetes-preserve-unknown-fields: true
+                                name:
+                                  type: string
+                              required:
+                              - name
                               type: object
                             setCanaryScale:
                               properties:
@@ -903,6 +936,9 @@ spec:
                               - name
                               type: object
                             type: array
+                          maxTrafficWeight:
+                            format: int32
+                            type: integer
                           nginx:
                             properties:
                               additionalIngressAnnotations:
@@ -911,6 +947,10 @@ spec:
                                 type: object
                               annotationPrefix:
                                 type: string
+                              canaryIngressAnnotations:
+                                additionalProperties:
+                                  type: string
+                                type: object
                               stableIngress:
                                 type: string
                               stableIngresses:
@@ -1083,6 +1123,16 @@ spec:
                                               type: object
                                           type: object
                                           x-kubernetes-map-type: atomic
+                                        matchLabelKeys:
+                                          items:
+                                            type: string
+                                          type: array
+                                          x-kubernetes-list-type: atomic
+                                        mismatchLabelKeys:
+                                          items:
+                                            type: string
+                                          type: array
+                                          x-kubernetes-list-type: atomic
                                         namespaceSelector:
                                           properties:
                                             matchExpressions:
@@ -1151,6 +1201,16 @@ spec:
                                           type: object
                                       type: object
                                       x-kubernetes-map-type: atomic
+                                    matchLabelKeys:
+                                      items:
+                                        type: string
+                                      type: array
+                                      x-kubernetes-list-type: atomic
+                                    mismatchLabelKeys:
+                                      items:
+                                        type: string
+                                      type: array
+                                      x-kubernetes-list-type: atomic
                                     namespaceSelector:
                                       properties:
                                         matchExpressions:
@@ -1217,6 +1277,16 @@ spec:
                                               type: object
                                           type: object
                                           x-kubernetes-map-type: atomic
+                                        matchLabelKeys:
+                                          items:
+                                            type: string
+                                          type: array
+                                          x-kubernetes-list-type: atomic
+                                        mismatchLabelKeys:
+                                          items:
+                                            type: string
+                                          type: array
+                                          x-kubernetes-list-type: atomic
                                         namespaceSelector:
                                           properties:
                                             matchExpressions:
@@ -1285,6 +1355,16 @@ spec:
                                           type: object
                                       type: object
                                       x-kubernetes-map-type: atomic
+                                    matchLabelKeys:
+                                      items:
+                                        type: string
+                                      type: array
+                                      x-kubernetes-list-type: atomic
+                                    mismatchLabelKeys:
+                                      items:
+                                        type: string
+                                      type: array
+                                      x-kubernetes-list-type: atomic
                                     namespaceSelector:
                                       properties:
                                         matchExpressions:
@@ -1464,6 +1544,14 @@ spec:
                                       required:
                                       - port
                                       type: object
+                                    sleep:
+                                      properties:
+                                        seconds:
+                                          format: int64
+                                          type: integer
+                                      required:
+                                      - seconds
+                                      type: object
                                     tcpSocket:
                                       properties:
                                         host:
@@ -1513,6 +1601,14 @@ spec:
                                           type: string
                                       required:
                                       - port
+                                      type: object
+                                    sleep:
+                                      properties:
+                                        seconds:
+                                          format: int64
+                                          type: integer
+                                      required:
+                                      - seconds
                                       type: object
                                     tcpSocket:
                                       properties:
@@ -1710,13 +1806,40 @@ spec:
                                   format: int32
                                   type: integer
                               type: object
+                            resizePolicy:
+                              items:
+                                properties:
+                                  resourceName:
+                                    type: string
+                                  restartPolicy:
+                                    type: string
+                                required:
+                                - resourceName
+                                - restartPolicy
+                                type: object
+                              type: array
+                              x-kubernetes-list-type: atomic
                             resources:
                               properties:
+                                claims:
+                                  items:
+                                    properties:
+                                      name:
+                                        type: string
+                                    required:
+                                    - name
+                                    type: object
+                                  type: array
+                                  x-kubernetes-list-map-keys:
+                                  - name
+                                  x-kubernetes-list-type: map
                                 limits:
                                   x-kubernetes-preserve-unknown-fields: true
                                 requests:
                                   x-kubernetes-preserve-unknown-fields: true
                               type: object
+                            restartPolicy:
+                              type: string
                             securityContext:
                               properties:
                                 allowPrivilegeEscalation:
@@ -2069,6 +2192,14 @@ spec:
                                       required:
                                       - port
                                       type: object
+                                    sleep:
+                                      properties:
+                                        seconds:
+                                          format: int64
+                                          type: integer
+                                      required:
+                                      - seconds
+                                      type: object
                                     tcpSocket:
                                       properties:
                                         host:
@@ -2118,6 +2249,14 @@ spec:
                                           type: string
                                       required:
                                       - port
+                                      type: object
+                                    sleep:
+                                      properties:
+                                        seconds:
+                                          format: int64
+                                          type: integer
+                                      required:
+                                      - seconds
                                       type: object
                                     tcpSocket:
                                       properties:
@@ -2315,13 +2454,40 @@ spec:
                                   format: int32
                                   type: integer
                               type: object
+                            resizePolicy:
+                              items:
+                                properties:
+                                  resourceName:
+                                    type: string
+                                  restartPolicy:
+                                    type: string
+                                required:
+                                - resourceName
+                                - restartPolicy
+                                type: object
+                              type: array
+                              x-kubernetes-list-type: atomic
                             resources:
                               properties:
+                                claims:
+                                  items:
+                                    properties:
+                                      name:
+                                        type: string
+                                    required:
+                                    - name
+                                    type: object
+                                  type: array
+                                  x-kubernetes-list-map-keys:
+                                  - name
+                                  x-kubernetes-list-type: map
                                 limits:
                                   x-kubernetes-preserve-unknown-fields: true
                                 requests:
                                   x-kubernetes-preserve-unknown-fields: true
                               type: object
+                            restartPolicy:
+                              type: string
                             securityContext:
                               properties:
                                 allowPrivilegeEscalation:
@@ -2681,6 +2847,14 @@ spec:
                                       required:
                                       - port
                                       type: object
+                                    sleep:
+                                      properties:
+                                        seconds:
+                                          format: int64
+                                          type: integer
+                                      required:
+                                      - seconds
+                                      type: object
                                     tcpSocket:
                                       properties:
                                         host:
@@ -2730,6 +2904,14 @@ spec:
                                           type: string
                                       required:
                                       - port
+                                      type: object
+                                    sleep:
+                                      properties:
+                                        seconds:
+                                          format: int64
+                                          type: integer
+                                      required:
+                                      - seconds
                                       type: object
                                     tcpSocket:
                                       properties:
@@ -2927,13 +3109,40 @@ spec:
                                   format: int32
                                   type: integer
                               type: object
+                            resizePolicy:
+                              items:
+                                properties:
+                                  resourceName:
+                                    type: string
+                                  restartPolicy:
+                                    type: string
+                                required:
+                                - resourceName
+                                - restartPolicy
+                                type: object
+                              type: array
+                              x-kubernetes-list-type: atomic
                             resources:
                               properties:
+                                claims:
+                                  items:
+                                    properties:
+                                      name:
+                                        type: string
+                                    required:
+                                    - name
+                                    type: object
+                                  type: array
+                                  x-kubernetes-list-map-keys:
+                                  - name
+                                  x-kubernetes-list-type: map
                                 limits:
                                   x-kubernetes-preserve-unknown-fields: true
                                 requests:
                                   x-kubernetes-preserve-unknown-fields: true
                               type: object
+                            restartPolicy:
+                              type: string
                             securityContext:
                               properties:
                                 allowPrivilegeEscalation:
@@ -3159,12 +3368,43 @@ spec:
                           - conditionType
                           type: object
                         type: array
+                      resourceClaims:
+                        items:
+                          properties:
+                            name:
+                              type: string
+                            source:
+                              properties:
+                                resourceClaimName:
+                                  type: string
+                                resourceClaimTemplateName:
+                                  type: string
+                              type: object
+                          required:
+                          - name
+                          type: object
+                        type: array
+                        x-kubernetes-list-map-keys:
+                        - name
+                        x-kubernetes-list-type: map
                       restartPolicy:
                         type: string
                       runtimeClassName:
                         type: string
                       schedulerName:
                         type: string
+                      schedulingGates:
+                        items:
+                          properties:
+                            name:
+                              type: string
+                          required:
+                          - name
+                          type: object
+                        type: array
+                        x-kubernetes-list-map-keys:
+                        - name
+                        x-kubernetes-list-type: map
                       securityContext:
                         properties:
                           fsGroup:
@@ -3330,6 +3570,8 @@ spec:
                     type: string
                   name:
                     type: string
+                  scaleDown:
+                    type: string
                 type: object
             type: object
           status:
@@ -3492,6 +3734,45 @@ spec:
                     type: object
                   stablePingPong:
                     type: string
+                  stepPluginStatuses:
+                    items:
+                      properties:
+                        backoff:
+                          type: string
+                        disabled:
+                          type: boolean
+                        executions:
+                          format: int32
+                          type: integer
+                        finishedAt:
+                          format: date-time
+                          type: string
+                        index:
+                          format: int32
+                          type: integer
+                        message:
+                          type: string
+                        name:
+                          type: string
+                        operation:
+                          type: string
+                        phase:
+                          type: string
+                        startedAt:
+                          format: date-time
+                          type: string
+                        status:
+                          type: object
+                          x-kubernetes-preserve-unknown-fields: true
+                        updatedAt:
+                          format: date-time
+                          type: string
+                      required:
+                      - index
+                      - name
+                      - operation
+                      type: object
+                    type: array
                   weights:
                     properties:
                       additional:

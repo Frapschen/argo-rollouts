@@ -13,6 +13,7 @@ import (
 	"time"
 
 	a6util "github.com/argoproj/argo-rollouts/utils/apisix"
+	k8errors "k8s.io/apimachinery/pkg/api/errors"
 
 	smiv1alpha1 "github.com/servicemeshinterface/smi-sdk-go/pkg/apis/split/v1alpha1"
 	smiclientset "github.com/servicemeshinterface/smi-sdk-go/pkg/gen/client/split/clientset/versioned"
@@ -71,11 +72,19 @@ func (c *Common) CheckError(err error) {
 	}
 }
 
+// Rollout returns the original rollout manifest used in the test
 func (c *Common) Rollout() *rov1.Rollout {
 	var ro rov1.Rollout
 	err := runtime.DefaultUnstructuredConverter.FromUnstructured(c.rollout.Object, &ro)
 	c.CheckError(err)
 	return &ro
+}
+
+// GetRollout returns the live rollout object in the cluster
+func (c *Common) GetRollout() *rov1.Rollout {
+	ro, err := c.rolloutClient.ArgoprojV1alpha1().Rollouts(c.namespace).Get(context.TODO(), c.Rollout().GetName(), metav1.GetOptions{})
+	c.CheckError(err)
+	return ro
 }
 
 func (c *Common) PrintRollout(name string) {
@@ -671,6 +680,17 @@ func (c *Common) GetRolloutEventReasons() []string {
 		}
 	}
 	return reasons
+}
+
+func (c *Common) GetControllerConfig() *corev1.ConfigMap {
+	configMap, err := c.kubeClient.CoreV1().ConfigMaps(c.namespace).Get(c.Context, "argo-rollouts-config", metav1.GetOptions{})
+	if err != nil {
+		if k8errors.IsNotFound(err) {
+			return nil
+		}
+		c.CheckError(err)
+	}
+	return configMap
 }
 
 // PrintRolloutEvents prints all Kubernetes events associated with the given rollout.

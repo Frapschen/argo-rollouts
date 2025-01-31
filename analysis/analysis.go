@@ -9,6 +9,7 @@ import (
 
 	log "github.com/sirupsen/logrus"
 	corev1 "k8s.io/api/core/v1"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/pointer"
 
@@ -40,10 +41,15 @@ type metricTask struct {
 }
 
 func (c *Controller) reconcileAnalysisRun(origRun *v1alpha1.AnalysisRun) *v1alpha1.AnalysisRun {
+	logger := logutil.WithAnalysisRun(origRun)
 	if origRun.Status.Phase.Completed() {
+		err := c.maybeGarbageCollectAnalysisRun(origRun, logger)
+		if err != nil {
+			// TODO(jessesuen): surface errors to controller so they can be retried
+			logger.Warnf("Failed to garbage collect analysis run: %v", err)
+		}
 		return origRun
 	}
-	logger := logutil.WithAnalysisRun(origRun)
 	run := origRun.DeepCopy()
 
 	if run.Status.MetricResults == nil {
@@ -108,6 +114,10 @@ func (c *Controller) reconcileAnalysisRun(origRun *v1alpha1.AnalysisRun) *v1alph
 		run.Status.Message = newMessage
 		if newStatus.Completed() {
 			c.recordAnalysisRunCompletionEvent(run)
+			if run.Status.CompletedAt == nil {
+				now := timeutil.MetaNow()
+				run.Status.CompletedAt = &now
+			}
 		}
 	}
 
@@ -322,7 +332,7 @@ func (c *Controller) runMeasurements(run *v1alpha1.AnalysisRun, tasks []metricTa
 			logger := logutil.WithRedactor(*logutil.WithAnalysisRun(run).WithField("metric", t.metric.Name), secrets)
 
 			var newMeasurement v1alpha1.Measurement
-			provider, providerErr := c.newProvider(*logger, t.metric)
+			provider, providerErr := c.newProvider(*logger, run.Namespace, t.metric)
 			if providerErr != nil {
 				log.Errorf("Error in getting metric provider :%v", providerErr)
 				if t.incompleteMeasurement != nil {
@@ -377,17 +387,21 @@ func (c *Controller) runMeasurements(run *v1alpha1.AnalysisRun, tasks []metricTa
 					metricResult.Successful++
 					metricResult.Count++
 					metricResult.ConsecutiveError = 0
+					metricResult.ConsecutiveSuccess++
 				case v1alpha1.AnalysisPhaseFailed:
 					metricResult.Failed++
 					metricResult.Count++
 					metricResult.ConsecutiveError = 0
+					metricResult.ConsecutiveSuccess = 0
 				case v1alpha1.AnalysisPhaseInconclusive:
 					metricResult.Inconclusive++
 					metricResult.Count++
 					metricResult.ConsecutiveError = 0
+					metricResult.ConsecutiveSuccess = 0
 				case v1alpha1.AnalysisPhaseError:
 					metricResult.Error++
 					metricResult.ConsecutiveError++
+					metricResult.ConsecutiveSuccess = 0
 					logger.Warnf("Measurement had error: %s", newMeasurement.Message)
 				}
 			}
@@ -589,11 +603,47 @@ func assessMetricStatus(metric v1alpha1.Metric, result v1alpha1.MetricResult, te
 		return phaseFailureInconclusiveOrError
 	}
 
+	// Check if consecutiveSuccessLimit is applicable and was reached.
+	if metric.ConsecutiveSuccessLimit != nil && metric.ConsecutiveSuccessLimit.IntValue() > 0 && result.ConsecutiveSuccess >= int32(metric.ConsecutiveSuccessLimit.IntValue()) {
+		logger.Infof("Metric Assessment Result - %s: ConsecutiveSuccessLimit (%s) Reached", v1alpha1.AnalysisPhaseSuccessful, metric.ConsecutiveSuccessLimit.String())
+		return v1alpha1.AnalysisPhaseSuccessful
+	}
+
 	// If a count was specified, and we reached that count, then metric is considered Successful.
 	// The Error, Failed, Inconclusive counters are ignored because those checks have already been
 	// taken into consideration above, and we do not want to fail if failures < failureLimit.
 	effectiveCount := metric.EffectiveCount()
 	if effectiveCount != nil && result.Count >= int32(effectiveCount.IntValue()) {
+
+		failureApplicable := (metric.FailureLimit != nil && metric.FailureLimit.IntValue() >= 0) || metric.FailureLimit == nil
+		successApplicable := metric.ConsecutiveSuccessLimit != nil && metric.ConsecutiveSuccessLimit.IntValue() > 0
+
+		if failureApplicable && successApplicable {
+
+			// failureLimit was checked above and not reached.
+			// consecutiveSuccessLimit was checked above and not reached.
+
+			failureLimit := "0"
+			if metric.FailureLimit != nil {
+				failureLimit = metric.FailureLimit.String()
+			}
+
+			logger.Infof("Metric Assessment Result - %s: ConsecutiveSuccessLimit (%s) Not Reached and FailureLimit (%s) Not Violated", v1alpha1.AnalysisPhaseInconclusive, metric.ConsecutiveSuccessLimit.String(), failureLimit)
+			return v1alpha1.AnalysisPhaseInconclusive
+
+		} else if successApplicable {
+
+			logger.Infof("Metric Assessment Result - %s: ConsecutiveSuccessLimit (%s) Not Reached", v1alpha1.AnalysisPhaseFailed, metric.ConsecutiveSuccessLimit.String())
+			return v1alpha1.AnalysisPhaseFailed
+
+		} else if failureApplicable {
+			// failureLimit was not reached in assessMetricFailureInconclusiveOrError above.
+			// AnalysisPhaseSuccessful below.
+		} else {
+			// This cannot happen, since one of failureLimit or consecutiveSuccessLimit will be applicable
+			// We validate that failureLimit >= 0 when consecutiveSuccessLimit == 0
+		}
+
 		logger.Infof("Metric Assessment Result - %s: Count (%s) Reached", v1alpha1.AnalysisPhaseSuccessful, effectiveCount.String())
 		return v1alpha1.AnalysisPhaseSuccessful
 	}
@@ -613,7 +663,8 @@ func assessMetricFailureInconclusiveOrError(metric v1alpha1.Metric, result v1alp
 	if metric.FailureLimit != nil {
 		failureLimit = int32(metric.FailureLimit.IntValue())
 	}
-	if result.Failed > failureLimit {
+	// If failureLimit is negative, that means it isn't applicable.
+	if failureLimit >= 0 && result.Failed > failureLimit {
 		phase = v1alpha1.AnalysisPhaseFailed
 		message = fmt.Sprintf("failed (%d) > failureLimit (%d)", result.Failed, failureLimit)
 	}
@@ -734,7 +785,7 @@ func (c *Controller) garbageCollectMeasurements(run *v1alpha1.AnalysisRun, measu
 				continue
 			}
 			logger := logutil.WithAnalysisRun(run).WithField("metric", metric.Name)
-			provider, err := c.newProvider(*logger, metric)
+			provider, err := c.newProvider(*logger, run.Namespace, metric)
 			if err != nil {
 				errors = append(errors, err)
 				continue
@@ -751,4 +802,41 @@ func (c *Controller) garbageCollectMeasurements(run *v1alpha1.AnalysisRun, measu
 		return errors[0]
 	}
 	return nil
+}
+
+func (c *Controller) maybeGarbageCollectAnalysisRun(run *v1alpha1.AnalysisRun, logger *log.Entry) error {
+	ctx := context.TODO()
+	if run.DeletionTimestamp != nil || !isAnalysisRunTtlExceeded(run) {
+		return nil
+	}
+	logger.Infof("Trying to cleanup TTL exceeded analysis run")
+	err := c.argoProjClientset.ArgoprojV1alpha1().AnalysisRuns(run.Namespace).Delete(ctx, run.Name, metav1.DeleteOptions{})
+	if err != nil && !k8serrors.IsNotFound(err) {
+		return err
+	}
+	return nil
+}
+
+func isAnalysisRunTtlExceeded(run *v1alpha1.AnalysisRun) bool {
+	// TTL only counted for completed runs with TTL strategy.
+	if !run.Status.Phase.Completed() || run.Spec.TTLStrategy == nil {
+		return false
+	}
+	// Cannot determine TTL if run has no completion time.
+	if run.Status.CompletedAt == nil {
+		return false
+	}
+	secondsCompleted := timeutil.MetaNow().Sub(run.Status.CompletedAt.Time).Seconds()
+	var ttlSeconds *int32
+	if run.Status.Phase == v1alpha1.AnalysisPhaseSuccessful && run.Spec.TTLStrategy.SecondsAfterSuccess != nil {
+		ttlSeconds = run.Spec.TTLStrategy.SecondsAfterSuccess
+	} else if run.Status.Phase == v1alpha1.AnalysisPhaseFailed && run.Spec.TTLStrategy.SecondsAfterFailure != nil {
+		ttlSeconds = run.Spec.TTLStrategy.SecondsAfterFailure
+	} else if run.Spec.TTLStrategy.SecondsAfterCompletion != nil {
+		ttlSeconds = run.Spec.TTLStrategy.SecondsAfterCompletion
+	}
+	if ttlSeconds == nil {
+		return false
+	}
+	return int32(secondsCompleted) > *ttlSeconds
 }

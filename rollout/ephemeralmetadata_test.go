@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	v1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -132,9 +133,9 @@ func TestSyncCanaryEphemeralMetadataSecondRevision(t *testing.T) {
 
 	f.expectUpdateRolloutStatusAction(r2)         // Update Rollout conditions
 	rs2idx := f.expectCreateReplicaSetAction(rs2) // Create revision 2 ReplicaSet
+	rs1idx := f.expectUpdateReplicaSetAction(rs1) // update stable replicaset with stable metadata
 	f.expectListPodAction(r1.Namespace)           // list pods to patch ephemeral data on revision 1 ReplicaSets pods
 	podIdx := f.expectUpdatePodAction(&pod)       // Update pod with ephemeral data
-	rs1idx := f.expectUpdateReplicaSetAction(rs1) // update stable replicaset with stable metadata
 	f.expectUpdateReplicaSetAction(rs1)           // scale revision 1 ReplicaSet down
 	f.expectPatchRolloutAction(r2)                // Patch Rollout status
 
@@ -168,7 +169,7 @@ func TestSyncBlueGreenEphemeralMetadataSecondRevision(t *testing.T) {
 	f := newFixture(t)
 	defer f.Close()
 
-	r1 := newBlueGreenRollout("foo", 1, nil, "active", "preview")
+	r1 := newBlueGreenRollout("foo", 3, nil, "active", "preview")
 	r1.Spec.Strategy.BlueGreen.AutoPromotionEnabled = pointer.BoolPtr(false)
 	r1.Annotations[annotations.RevisionAnnotation] = "1"
 	r1.Spec.Strategy.BlueGreen.PreviewMetadata = &v1alpha1.PodTemplateMetadata{
@@ -212,9 +213,9 @@ func TestSyncBlueGreenEphemeralMetadataSecondRevision(t *testing.T) {
 	rs2idx := f.expectCreateReplicaSetAction(rs2)      // Create revision 2 ReplicaSet
 	f.expectPatchServiceAction(previewSvc, rs2PodHash) // Update preview service to point at revision 2 replicaset
 	f.expectUpdateReplicaSetAction(rs2)                // scale revision 2 ReplicaSet up
+	rs1idx := f.expectUpdateReplicaSetAction(rs1)      // update stable replicaset with stable metadata
 	f.expectListPodAction(r1.Namespace)                // list pods to patch ephemeral data on revision 1 ReplicaSets pods`
 	podIdx := f.expectUpdatePodAction(&pod)            // Update pod with ephemeral data
-	rs1idx := f.expectUpdateReplicaSetAction(rs1)      // update stable replicaset with stable metadata
 	f.expectPatchRolloutAction(r2)                     // Patch Rollout status
 
 	f.run(getKey(r2, t))
@@ -238,4 +239,37 @@ func TestSyncBlueGreenEphemeralMetadataSecondRevision(t *testing.T) {
 	// also it's pods
 	updatedPod := f.getUpdatedPod(podIdx)
 	assert.Equal(t, expectedStableLabels, updatedPod.Labels)
+}
+
+func TestReconcileEphemeralMetadata(t *testing.T) {
+	newRS := &v1.ReplicaSet{}
+	stableRS := &v1.ReplicaSet{}
+
+	mockContext := &rolloutContext{
+		rollout: &v1alpha1.Rollout{
+			Spec: v1alpha1.RolloutSpec{
+				Strategy: v1alpha1.RolloutStrategy{
+					Canary: &v1alpha1.CanaryStrategy{
+						CanaryMetadata: &v1alpha1.PodTemplateMetadata{},
+						StableMetadata: &v1alpha1.PodTemplateMetadata{},
+					},
+				},
+			},
+			Status: v1alpha1.RolloutStatus{
+				StableRS: "some-stable-rs-hash",
+			},
+		},
+		newRS:    newRS,
+		stableRS: stableRS,
+		otherRSs: []*v1.ReplicaSet{new(v1.ReplicaSet), new(v1.ReplicaSet)},
+	}
+
+	// Scenario 1: upgrading state when the new ReplicaSet is a canary
+	err := mockContext.reconcileEphemeralMetadata()
+	assert.NoError(t, err)
+
+	// Scenario 2: Sync stable metadata to the stable ReplicaSet
+	mockContext.rollout.Status.StableRS = "" // Set stable ReplicaSet to empty to simulate an upgrading state
+	err = mockContext.reconcileEphemeralMetadata()
+	assert.NoError(t, err)
 }

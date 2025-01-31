@@ -2,6 +2,7 @@ package job
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -36,7 +37,7 @@ func newTestJobProvider(objects ...runtime.Object) *JobProvider {
 	cancel()
 
 	jobLister := k8sI.Batch().V1().Jobs().Lister()
-	return NewJobProvider(*logCtx, kubeclient, jobLister)
+	return NewJobProvider(*logCtx, kubeclient, jobLister, "", false)
 }
 
 func newRunWithJobMetric() *v1alpha1.AnalysisRun {
@@ -178,7 +179,7 @@ func TestRunCreateFail(t *testing.T) {
 	// The following causes the Create call to fail
 	fakeClient := p.kubeclientset.(*k8sfake.Clientset)
 	fakeClient.PrependReactor("create", "*", func(action kubetesting.Action) (handled bool, ret runtime.Object, err error) {
-		return true, nil, fmt.Errorf(errMsg)
+		return true, nil, errors.New(errMsg)
 	})
 	metricsMetadata := p.GetMetadata(run.Spec.Metrics[0])
 	assert.Nil(t, metricsMetadata)
@@ -193,7 +194,7 @@ func TestRunCreateCollision(t *testing.T) {
 	p := newTestJobProvider()
 	run := newRunWithJobMetric()
 
-	existingJob, err := newMetricJob(run, run.Spec.Metrics[0])
+	existingJob, err := newMetricJob(run, run.Spec.Metrics[0], p.jobNamespace, p.customJobKubeconfig)
 	assert.NoError(t, err)
 	fakeClient := p.kubeclientset.(*k8sfake.Clientset)
 	fakeClient.Tracker().Add(existingJob)
@@ -269,7 +270,7 @@ func TestTerminateError(t *testing.T) {
 	errMsg := "random delete error"
 	fakeClient := p.kubeclientset.(*k8sfake.Clientset)
 	fakeClient.PrependReactor("delete", "*", func(action kubetesting.Action) (handled bool, ret runtime.Object, err error) {
-		return true, nil, fmt.Errorf(errMsg)
+		return true, nil, errors.New(errMsg)
 	})
 
 	measurement = p.Terminate(run, run.Spec.Metrics[0], measurement)

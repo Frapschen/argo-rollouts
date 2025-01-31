@@ -42,6 +42,7 @@ import (
 	clientset "github.com/argoproj/argo-rollouts/pkg/client/clientset/versioned"
 	informers "github.com/argoproj/argo-rollouts/pkg/client/informers/externalversions/rollouts/v1alpha1"
 	listers "github.com/argoproj/argo-rollouts/pkg/client/listers/rollouts/v1alpha1"
+	"github.com/argoproj/argo-rollouts/rollout/steps/plugin"
 	"github.com/argoproj/argo-rollouts/rollout/trafficrouting"
 	"github.com/argoproj/argo-rollouts/rollout/trafficrouting/ambassador"
 	"github.com/argoproj/argo-rollouts/rollout/trafficrouting/appmesh"
@@ -405,14 +406,30 @@ func (c *Controller) syncHandler(ctx context.Context, key string) error {
 	}()
 
 	resolveErr := c.refResolver.Resolve(r)
+	// We could maybe lose setting the error condition from the below if resolveErr != nil {}, and just log the error to clean up the logic
 	roCtx, err := c.newRolloutContext(r)
+	if roCtx == nil {
+		logCtx.Error("newRolloutContext returned nil")
+		return err
+	}
 	if err != nil {
+		if _, ok := err.(*field.Error); ok {
+			// We want to frequently requeue rollouts with InvalidSpec errors, because the error
+			// condition might be timing related (e.g. the Rollout was applied before the Service).
+			c.enqueueRolloutAfter(roCtx.rollout, 20*time.Second)
+			return nil // do not requeue from error because we already re-queued above
+		}
 		logCtx.Errorf("newRolloutContext err %v", err)
 		return err
 	}
+	// We should probably delete this if block and just log the error to clean up the logic, a bigger change would be to add a new
+	// field to the status maybe (reconcileErrMsg) and store the errors there from the processNextWorkItem function in controller/controller.go
 	if resolveErr != nil {
-		roCtx.createInvalidRolloutCondition(resolveErr, r)
-		return resolveErr
+		err := roCtx.createInvalidRolloutCondition(resolveErr, r)
+		if err != nil {
+			return fmt.Errorf("failed to create invalid rollout condition during resolving the rollout: %w", err)
+		}
+		return fmt.Errorf("failed to resolve rollout: %w", resolveErr)
 	}
 
 	// In order to work with HPA, the rollout.Spec.Replica field cannot be nil. As a result, the controller will update
@@ -520,8 +537,37 @@ func (c *Controller) newRolloutContext(rollout *v1alpha1.Rollout) (*rolloutConte
 			rollout: rollout,
 			log:     logCtx,
 		},
+		stepPluginContext: &stepPluginContext{
+			resolver: plugin.NewResolver(),
+			log:      logCtx,
+		},
 		reconcilerBase: c.reconcilerBase,
 	}
+
+	// Get Rollout Validation errors
+	err = roCtx.getRolloutValidationErrors()
+	if err != nil {
+		if vErr, ok := err.(*field.Error); ok {
+			err := roCtx.createInvalidRolloutCondition(vErr, roCtx.rollout)
+			if err != nil {
+				return nil, err
+			}
+			return nil, vErr
+		}
+		return nil, err
+	}
+
+	if roCtx.newRS == nil {
+		roCtx.newRS, err = roCtx.createDesiredReplicaSet()
+		if err != nil {
+			return nil, err
+		}
+		roCtx.olderRSs = replicasetutil.FindOldReplicaSets(roCtx.rollout, rsList, roCtx.newRS)
+		roCtx.stableRS = replicasetutil.GetStableRS(roCtx.rollout, roCtx.newRS, roCtx.olderRSs)
+		roCtx.otherRSs = replicasetutil.GetOtherRSs(roCtx.rollout, roCtx.newRS, roCtx.stableRS, rsList)
+		roCtx.allRSs = append(rsList, roCtx.newRS)
+	}
+
 	if rolloututil.IsFullyPromoted(rollout) && roCtx.pauseContext.IsAborted() {
 		logCtx.Warnf("Removing abort condition from fully promoted rollout")
 		roCtx.pauseContext.RemoveAbort()
@@ -795,38 +841,64 @@ func (c *rolloutContext) getReferencedRolloutAnalyses() (*[]validation.AnalysisT
 }
 
 func (c *rolloutContext) getReferencedAnalysisTemplates(rollout *v1alpha1.Rollout, rolloutAnalysis *v1alpha1.RolloutAnalysis, templateType validation.AnalysisTemplateType, canaryStepIndex int) (*validation.AnalysisTemplatesWithType, error) {
-	templates := make([]*v1alpha1.AnalysisTemplate, 0)
-	clusterTemplates := make([]*v1alpha1.ClusterAnalysisTemplate, 0)
 	fldPath := validation.GetAnalysisTemplateWithTypeFieldPath(templateType, canaryStepIndex)
 
-	for _, templateRef := range rolloutAnalysis.Templates {
-		if templateRef.ClusterScope {
-			template, err := c.clusterAnalysisTemplateLister.Get(templateRef.TemplateName)
-			if err != nil {
-				if k8serrors.IsNotFound(err) {
-					return nil, field.Invalid(fldPath, templateRef.TemplateName, fmt.Sprintf("ClusterAnalysisTemplate '%s' not found", templateRef.TemplateName))
-				}
-				return nil, err
-			}
-			clusterTemplates = append(clusterTemplates, template)
-		} else {
-			template, err := c.analysisTemplateLister.AnalysisTemplates(c.rollout.Namespace).Get(templateRef.TemplateName)
-			if err != nil {
-				if k8serrors.IsNotFound(err) {
-					return nil, field.Invalid(fldPath, templateRef.TemplateName, fmt.Sprintf("AnalysisTemplate '%s' not found", templateRef.TemplateName))
-				}
-				return nil, err
-			}
-			templates = append(templates, template)
-		}
-	}
+	templates, clusterTemplates, err := c.getReferencedAnalysisTemplatesFromRef(&rolloutAnalysis.Templates, fldPath)
 
 	return &validation.AnalysisTemplatesWithType{
 		AnalysisTemplates:        templates,
 		ClusterAnalysisTemplates: clusterTemplates,
 		TemplateType:             templateType,
 		CanaryStepIndex:          canaryStepIndex,
-	}, nil
+	}, err
+}
+
+func (c *rolloutContext) getReferencedAnalysisTemplatesFromRef(templateRefs *[]v1alpha1.AnalysisTemplateRef, fieldPath *field.Path) ([]*v1alpha1.AnalysisTemplate, []*v1alpha1.ClusterAnalysisTemplate, error) {
+	templates := make([]*v1alpha1.AnalysisTemplate, 0)
+	clusterTemplates := make([]*v1alpha1.ClusterAnalysisTemplate, 0)
+	for _, templateRef := range *templateRefs {
+		if templateRef.ClusterScope {
+			template, err := c.clusterAnalysisTemplateLister.Get(templateRef.TemplateName)
+			if err != nil {
+				if k8serrors.IsNotFound(err) {
+					return nil, nil, field.Invalid(fieldPath, templateRef.TemplateName, fmt.Sprintf("ClusterAnalysisTemplate '%s' not found", templateRef.TemplateName))
+				}
+				return nil, nil, err
+			}
+			clusterTemplates = append(clusterTemplates, template)
+			// Look for nested templates
+			if template.Spec.Templates != nil {
+				innerFldPath := field.NewPath("spec", "templates")
+				innerTemplates, innerClusterTemplates, innerErr := c.getReferencedAnalysisTemplatesFromRef(&template.Spec.Templates, innerFldPath)
+				if innerErr != nil {
+					return nil, nil, innerErr
+				}
+				clusterTemplates = append(clusterTemplates, innerClusterTemplates...)
+				templates = append(templates, innerTemplates...)
+			}
+		} else {
+			template, err := c.analysisTemplateLister.AnalysisTemplates(c.rollout.Namespace).Get(templateRef.TemplateName)
+			if err != nil {
+				if k8serrors.IsNotFound(err) {
+					return nil, nil, field.Invalid(fieldPath, templateRef.TemplateName, fmt.Sprintf("AnalysisTemplate '%s' not found", templateRef.TemplateName))
+				}
+				return nil, nil, err
+			}
+			templates = append(templates, template)
+			// Look for nested templates
+			if template.Spec.Templates != nil {
+				innerFldPath := field.NewPath("spec", "templates")
+				innerTemplates, innerClusterTemplates, innerErr := c.getReferencedAnalysisTemplatesFromRef(&template.Spec.Templates, innerFldPath)
+				if innerErr != nil {
+					return nil, nil, innerErr
+				}
+				clusterTemplates = append(clusterTemplates, innerClusterTemplates...)
+				templates = append(templates, innerTemplates...)
+			}
+		}
+	}
+	uniqueTemplates, uniqueClusterTemplates := analysisutil.FilterUniqueTemplates(templates, clusterTemplates)
+	return uniqueTemplates, uniqueClusterTemplates, nil
 }
 
 func (c *rolloutContext) getReferencedIngresses() (*[]ingressutil.Ingress, error) {
@@ -910,4 +982,16 @@ func remarshalRollout(r *v1alpha1.Rollout) *v1alpha1.Rollout {
 		panic(err)
 	}
 	return &remarshalled
+}
+
+// updateReplicaSet updates the replicaset using kubeclient update. It returns the updated replicaset and copies the updated replicaset
+// into the passed in pointer as well.
+func (c *rolloutContext) updateReplicaSet(ctx context.Context, rs *appsv1.ReplicaSet) (*appsv1.ReplicaSet, error) {
+	updatedRS, err := c.kubeclientset.AppsV1().ReplicaSets(rs.Namespace).Update(ctx, rs, metav1.UpdateOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("error updating replicaset in updateReplicaSet %s: %w", rs.Name, err)
+	}
+	updatedRS.DeepCopyInto(rs)
+
+	return rs, err
 }

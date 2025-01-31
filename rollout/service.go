@@ -130,7 +130,7 @@ func (c *rolloutContext) areTargetsVerified() bool {
 // by an ALB Ingress, which can be determined if there exists a TargetGroupBinding object in the
 // namespace that references the given service
 func (c *rolloutContext) awsVerifyTargetGroups(svc *corev1.Service) error {
-	if !c.shouldVerifyTargetGroup(svc) {
+	if !shouldVerifyTargetGroup(c.rollout, c.newRS, svc) {
 		return nil
 	}
 	logCtx := c.log.WithField(logutil.ServiceKey, svc.Name)
@@ -147,7 +147,7 @@ func (c *rolloutContext) awsVerifyTargetGroups(svc *corev1.Service) error {
 		return nil
 	}
 
-	c.targetsVerified = pointer.BoolPtr(false)
+	c.targetsVerified = pointer.Bool(false)
 
 	// get endpoints of service
 	endpoints, err := c.kubeclientset.CoreV1().Endpoints(svc.Namespace).Get(ctx, svc.Name, metav1.GetOptions{})
@@ -177,19 +177,19 @@ func (c *rolloutContext) awsVerifyTargetGroups(svc *corev1.Service) error {
 		}
 		c.recorder.Eventf(c.rollout, record.EventOptions{EventReason: conditions.TargetGroupVerifiedReason}, conditions.TargetGroupVerifiedRegistrationMessage, svc.Name, tgb.Spec.TargetGroupARN, verifyRes.EndpointsRegistered)
 	}
-	c.targetsVerified = pointer.BoolPtr(true)
+	c.targetsVerified = pointer.Bool(true)
 	return nil
 }
 
 // shouldVerifyTargetGroup returns whether or not we should verify the target group
-func (c *rolloutContext) shouldVerifyTargetGroup(svc *corev1.Service) bool {
+func shouldVerifyTargetGroup(rollout *v1alpha1.Rollout, newRS *appsv1.ReplicaSet, svc *corev1.Service) bool {
 	if !defaults.VerifyTargetGroup() {
 		// feature is disabled
 		return false
 	}
-	desiredPodHash := c.newRS.Labels[v1alpha1.DefaultRolloutUniqueLabelKey]
-	if c.rollout.Spec.Strategy.BlueGreen != nil {
-		if c.rollout.Status.StableRS == desiredPodHash {
+	desiredPodHash := newRS.Labels[v1alpha1.DefaultRolloutUniqueLabelKey]
+	if rollout.Spec.Strategy.BlueGreen != nil {
+		if rollout.Status.StableRS == desiredPodHash {
 			// for blue-green, we only verify targets right after switching active service. So if
 			// we are fully promoted, then there is no need to verify targets.
 			// NOTE: this is the opposite of canary, where we only verify targets if stable == desired
@@ -200,17 +200,17 @@ func (c *rolloutContext) shouldVerifyTargetGroup(svc *corev1.Service) bool {
 			// we have not yet switched service selector
 			return false
 		}
-		if c.rollout.Status.BlueGreen.PostPromotionAnalysisRunStatus != nil {
+		if rollout.Status.BlueGreen.PostPromotionAnalysisRunStatus != nil {
 			// we already started post-promotion analysis, so verification already occurred
 			return false
 		}
 		return true
-	} else if c.rollout.Spec.Strategy.Canary != nil {
-		if c.rollout.Spec.Strategy.Canary.TrafficRouting == nil || c.rollout.Spec.Strategy.Canary.TrafficRouting.ALB == nil {
+	} else if rollout.Spec.Strategy.Canary != nil {
+		if rollout.Spec.Strategy.Canary.TrafficRouting == nil || rollout.Spec.Strategy.Canary.TrafficRouting.ALB == nil {
 			// not ALB canary, so no need to verify targets
 			return false
 		}
-		if c.rollout.Status.StableRS != desiredPodHash {
+		if rollout.Status.StableRS != desiredPodHash {
 			// for canary, we only verify targets right after switching stable service, which happens
 			// after the update. So if stable != desired, we are still in the middle of an update
 			// and there is no need to verify targets.
@@ -243,7 +243,7 @@ func (c *rolloutContext) getPreviewAndActiveServices() (*corev1.Service, *corev1
 
 func (c *rolloutContext) reconcilePingAndPongService() error {
 	if trafficrouting.IsPingPongEnabled(c.rollout) && !rolloututils.IsFullyPromoted(c.rollout) {
-		_, canaryService := trafficrouting.GetStableAndCanaryServices(c.rollout)
+		_, canaryService := trafficrouting.GetStableAndCanaryServices(c.rollout, true)
 		return c.ensureSVCTargets(canaryService, c.newRS, false)
 	}
 	return nil
@@ -263,6 +263,17 @@ func (c *rolloutContext) reconcileStableAndCanaryService() error {
 		if err != nil {
 			return err
 		}
+		return nil
+	}
+
+	if dynamicallyRollingBackToStable, currSelector := isDynamicallyRollingBackToStable(c.rollout, c.newRS); dynamicallyRollingBackToStable {
+		// User may have interrupted an update in order go back to stableRS, and is using dynamic
+		// stable scaling. If that is the case, the stableRS might be undersized and if we blindly
+		// switch service selector we could overwhelm stableRS pods.
+		// If we get here, we detected that the canary service needs to be pointed back to
+		// stable, but stable is not fully available. Skip the service switch for now.
+		c.log.Infof("delaying fully promoted service switch of '%s' from %s to %s: ReplicaSet '%s' not fully available",
+			c.rollout.Spec.Strategy.Canary.CanaryService, currSelector, replicasetutil.GetPodTemplateHash(c.newRS), c.newRS.Name)
 		return nil
 	}
 

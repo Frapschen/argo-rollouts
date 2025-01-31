@@ -1,6 +1,7 @@
 package validation
 
 import (
+	"errors"
 	"fmt"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -127,7 +128,7 @@ func ValidateAnalysisTemplatesWithType(rollout *v1alpha1.Rollout, templates Anal
 
 	templateNames := GetAnalysisTemplateNames(templates)
 	value := fmt.Sprintf("templateNames: %s", templateNames)
-	_, err := analysisutil.NewAnalysisRunFromTemplates(templates.AnalysisTemplates, templates.ClusterAnalysisTemplates, buildAnalysisArgs(templates.Args, rollout), []v1alpha1.DryRun{}, []v1alpha1.MeasurementRetention{}, "", "", "")
+	_, err := analysisutil.NewAnalysisRunFromTemplates(templates.AnalysisTemplates, templates.ClusterAnalysisTemplates, buildAnalysisArgs(templates.Args, rollout), []v1alpha1.DryRun{}, []v1alpha1.MeasurementRetention{}, make(map[string]string), make(map[string]string), "", "", "")
 	if err != nil {
 		allErrs = append(allErrs, field.Invalid(fldPath, value, err.Error()))
 		return allErrs
@@ -136,7 +137,7 @@ func ValidateAnalysisTemplatesWithType(rollout *v1alpha1.Rollout, templates Anal
 	if rollout.Spec.Strategy.Canary != nil {
 		for _, step := range rollout.Spec.Strategy.Canary.Steps {
 			if step.Analysis != nil {
-				_, err := analysisutil.NewAnalysisRunFromTemplates(templates.AnalysisTemplates, templates.ClusterAnalysisTemplates, buildAnalysisArgs(templates.Args, rollout), step.Analysis.DryRun, step.Analysis.MeasurementRetention, "", "", "")
+				_, err := analysisutil.NewAnalysisRunFromTemplates(templates.AnalysisTemplates, templates.ClusterAnalysisTemplates, buildAnalysisArgs(templates.Args, rollout), step.Analysis.DryRun, step.Analysis.MeasurementRetention, make(map[string]string), make(map[string]string), "", "", "")
 				if err != nil {
 					allErrs = append(allErrs, field.Invalid(fldPath, value, err.Error()))
 					return allErrs
@@ -342,11 +343,11 @@ func ValidateRolloutVirtualServicesConfig(r *v1alpha1.Rollout) error {
 		if canary.TrafficRouting != nil && canary.TrafficRouting.Istio != nil {
 			if istioutil.MultipleVirtualServiceConfigured(r) {
 				if r.Spec.Strategy.Canary.TrafficRouting.Istio.VirtualService != nil {
-					return field.InternalError(fldPath, fmt.Errorf(errorString))
+					return field.InternalError(fldPath, errors.New(errorString))
 				}
 			} else {
 				if r.Spec.Strategy.Canary.TrafficRouting.Istio.VirtualService == nil {
-					return field.InternalError(fldPath, fmt.Errorf(errorString))
+					return field.InternalError(fldPath, errors.New(errorString))
 				}
 			}
 		}

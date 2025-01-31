@@ -1,6 +1,4 @@
 /*
-Copyright 2023 The Kubernetes sample-controller Authors.
-
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
@@ -145,6 +143,10 @@ message AnalysisRunSpec {
   // +patchStrategy=merge
   // +optional
   repeated MeasurementRetention measurementRetention = 5;
+
+  // TTLStrategy object contains the strategy for the time to live depending on if the analysis succeeded or failed
+  // +optional
+  optional TTLStrategy ttlStrategy = 6;
 }
 
 // AnalysisRunStatus is the status for a AnalysisRun resource
@@ -166,6 +168,9 @@ message AnalysisRunStatus {
 
   // DryRunSummary contains the final results from the metric executions in the dry-run mode
   optional RunSummary dryRunSummary = 6;
+
+  // CompletedAt indicates when the analysisRun completed
+  optional k8s.io.apimachinery.pkg.apis.meta.v1.Time completedAt = 7;
 }
 
 // AnalysisRunStrategy configuration for the analysis runs and experiments to retain
@@ -197,6 +202,16 @@ message AnalysisTemplateList {
   repeated AnalysisTemplate items = 2;
 }
 
+message AnalysisTemplateRef {
+  // TemplateName name of template to use in AnalysisRun
+  // +optional
+  optional string templateName = 1;
+
+  // Whether to look for the templateName at cluster scope or namespace scope
+  // +optional
+  optional bool clusterScope = 2;
+}
+
 // AnalysisTemplateSpec is the specification for a AnalysisTemplate resource
 message AnalysisTemplateSpec {
   // Metrics contains the list of metrics to query as part of an analysis run
@@ -221,6 +236,11 @@ message AnalysisTemplateSpec {
   // +patchStrategy=merge
   // +optional
   repeated MeasurementRetention measurementRetention = 4;
+
+  // Templates reference to a list of analysis templates to combine with the rest of the metrics for an AnalysisRun
+  // +patchMergeKey=templateName
+  // +patchStrategy=merge
+  repeated AnalysisTemplateRef templates = 5;
 }
 
 // AntiAffinity defines which inter-pod scheduling rule to use for anti-affinity injection
@@ -301,6 +321,17 @@ message ArgumentValueFrom {
 
   // FieldRef
   optional FieldRef fieldRef = 2;
+}
+
+// Authentication method
+message Authentication {
+  // Sigv4 Config is the aws SigV4 configuration to use for SigV4 signing if using Amazon Managed Prometheus
+  // +optional
+  optional Sigv4Config sigv4 = 1;
+
+  // OAuth2 config
+  // +optional
+  optional OAuth2Config oauth2 = 2;
 }
 
 message AwsResourceRef {
@@ -417,6 +448,9 @@ message CanaryStatus {
 
   // StablePingPong For the ping-pong feature holds the current stable service, ping or pong
   optional string stablePingPong = 5;
+
+  // StepPluginStatuses holds the status of the step plugins executed
+  repeated StepPluginStatus stepPluginStatuses = 6;
 }
 
 // CanaryStep defines a step of a canary deployment.
@@ -446,6 +480,9 @@ message CanaryStep {
   // SetMirrorRoutes Mirrors traffic that matches rules to a particular destination
   // +optional
   optional SetMirrorRoute setMirrorRoute = 8;
+
+  // Plugin defines a plugin to execute for a step
+  optional PluginStep plugin = 9;
 }
 
 // CanaryStrategy defines parameters for a Replica Based Canary
@@ -606,12 +643,31 @@ message ClusterAnalysisTemplateList {
 }
 
 message DatadogMetric {
+  // +kubebuilder:default="5m"
+  // Interval refers to the Interval time window in Datadog (default: 5m). Not to be confused with the polling rate for the metric.
   optional string interval = 1;
 
   optional string query = 2;
 
+  // Queries is a map of query_name_as_key: query. You can then use query_name_as_key inside Formula.Used for v2
+  // +kubebuilder:validation:Type=object
+  map<string, string> queries = 3;
+
+  // Formula refers to the Formula made up of the queries. Only useful with Queries. Used for v2
+  optional string formula = 4;
+
   // ApiVersion refers to the Datadog API version being used (default: v1). v1 will eventually be deprecated.
-  optional string apiVersion = 3;
+  // +kubebuilder:validation:Enum=v1;v2
+  // +kubebuilder:default=v1
+  optional string apiVersion = 5;
+
+  // +kubebuilder:validation:Enum=avg;min;max;sum;last;percentile;mean;l2norm;area
+  // Aggregator is a type of aggregator to use for metrics-based queries (default: ""). Used for v2
+  optional string aggregator = 6;
+
+  // Secret refers to the name of the secret that should be used for an analysis and should exists in the namespace where the controller is.
+  // +optional
+  optional SecretRef secretRef = 7;
 }
 
 // DryRun defines the settings for running the analysis in Dry-Run mode.
@@ -745,6 +801,10 @@ message ExperimentSpec {
   // +patchStrategy=merge
   // +optional
   repeated MeasurementRetention measurementRetention = 8;
+
+  // AnalysisRunMetadata labels and annotations that will be added to the AnalysisRuns
+  // +optional
+  optional AnalysisRunMetadata analysisRunMetadata = 9;
 }
 
 // ExperimentStatus is the status for a Experiment resource
@@ -954,6 +1014,7 @@ message Metric {
 
   // FailureLimit is the maximum number of times the measurement is allowed to fail, before the
   // entire metric is considered Failed (default: 0)
+  // -1 for making it disabled (when opting to use ConsecutiveSuccessLimit solely)
   optional k8s.io.apimachinery.pkg.util.intstr.IntOrString failureLimit = 7;
 
   // InconclusiveLimit is the maximum number of times the measurement is allowed to measure
@@ -966,6 +1027,10 @@ message Metric {
 
   // Provider configuration to the external system to use to verify the analysis
   optional MetricProvider provider = 10;
+
+  // ConsecutiveSuccessLimit is the number of consecutive times the measurement must succeed for the
+  // entire metric to be considered Successful (default: 0, which means it's disabled)
+  optional k8s.io.apimachinery.pkg.util.intstr.IntOrString consecutiveSuccessLimit = 11;
 }
 
 // MetricProvider which external system to use to verify the analysis
@@ -1053,6 +1118,10 @@ message MetricResult {
   // the final state which gets used while taking measurements. For example, Prometheus uses this field
   // to store the final resolved query after substituting the template arguments.
   map<string, string> metadata = 12;
+
+  // ConsecutiveSuccess is the number of times a measurement was successful in succession
+  // Resets to zero when failures, inconclusive measurements, or errors are encountered
+  optional int32 consecutiveSuccess = 13;
 }
 
 // NewRelicMetric defines the newrelic query to perform canary analysis
@@ -1062,6 +1131,10 @@ message NewRelicMetric {
 
   // Query is a raw newrelic NRQL query to perform
   optional string query = 2;
+
+  // Timeout represents the duration limit in seconds that will apply to the NRQL query
+  // +optional
+  optional int64 timeout = 3;
 }
 
 // NginxTrafficRouting configuration for Nginx ingress controller to control traffic routing
@@ -1079,6 +1152,24 @@ message NginxTrafficRouting {
   // StableIngresses refers to the names of `Ingress` resources in the same namespace as the `Rollout` in a multi ingress scenario
   // +optional
   repeated string stableIngresses = 4;
+
+  // +optional
+  map<string, string> canaryIngressAnnotations = 5;
+}
+
+message OAuth2Config {
+  // OAuth2 provider token URL
+  optional string tokenUrl = 1;
+
+  // OAuth2 client ID
+  optional string clientId = 2;
+
+  // OAuth2 client secret
+  optional string clientSecret = 3;
+
+  // OAuth2 scopes
+  // +optional
+  repeated string scopes = 4;
 }
 
 // ObjectRef holds a references to the Kubernetes object
@@ -1091,6 +1182,9 @@ message ObjectRef {
 
   // Name of the referent
   optional string name = 3;
+
+  // Automatically scale down deployment
+  optional string scaleDown = 4;
 }
 
 // PauseCondition the reason for a pause and when it started
@@ -1107,6 +1201,17 @@ message PingPongSpec {
 
   // name of the pong service
   optional string pongService = 2;
+}
+
+message PluginStep {
+  // Name of the hashicorp go-plugin step to query
+  optional string name = 1;
+
+  // +kubebuilder:validation:Schemaless
+  // +kubebuilder:pruning:PreserveUnknownFields
+  // +kubebuilder:validation:Type=object
+  // Config is the configuration object for the specified plugin
+  optional bytes config = 2;
 }
 
 // PodTemplateMetadata extra labels to add to the template
@@ -1127,12 +1232,6 @@ message PreferredDuringSchedulingIgnoredDuringExecution {
 }
 
 // PrometheusMetric defines the prometheus query to perform canary analysis
-message PrometheusAuth {
-  // +optional
-  optional Sigv4Config sigv4 = 3;
-}
-
-// PrometheusMetric defines the prometheus query to perform canary analysis
 message PrometheusMetric {
   // Address is the HTTP address and port of the prometheus server
   optional string address = 1;
@@ -1140,9 +1239,9 @@ message PrometheusMetric {
   // Query is a raw prometheus query to perform
   optional string query = 2;
 
-  // Sigv4 Config is the aws SigV4 configuration to use for SigV4 signing if using Amazon Managed Prometheus
+  // Authentication details
   // +optional
-  optional PrometheusAuth authentication = 3;
+  optional Authentication authentication = 3;
 
   // Timeout represents the duration within which a prometheus query should complete. It is expressed in seconds.
   // +optional
@@ -1156,6 +1255,22 @@ message PrometheusMetric {
   // +patchMergeKey=key
   // +patchStrategy=merge
   repeated WebMetricHeader headers = 6;
+
+  // Arguments for prometheus
+  // +optional
+  optional PrometheusRangeQueryArgs rangeQuery = 7;
+}
+
+// Arguments to perform a prometheus range query
+message PrometheusRangeQueryArgs {
+  // The start time to query in expr format e.g. now(), now() - duration("1h"), now() - duration("{{args.lookback_duration}}")
+  optional string start = 1;
+
+  // The end time to query in expr format e.g. now(), now() - duration("1h"), now() - duration("{{args.lookback_duration}}")
+  optional string end = 2;
+
+  // The maximum time between two slices from the start to end (e.g. 30s, 5m, 1h).
+  optional string step = 3;
 }
 
 // RequiredDuringSchedulingIgnoredDuringExecution defines inter-pod scheduling rule to be RequiredDuringSchedulingIgnoredDuringExecution
@@ -1180,7 +1295,7 @@ message RolloutAnalysis {
   // Templates reference to a list of analysis templates to combine for an AnalysisRun
   // +patchMergeKey=templateName
   // +patchStrategy=merge
-  repeated RolloutAnalysisTemplate templates = 1;
+  repeated AnalysisTemplateRef templates = 1;
 
   // Args the arguments that will be added to the AnalysisRuns
   // +patchMergeKey=name
@@ -1221,16 +1336,6 @@ message RolloutAnalysisRunStatus {
   optional string message = 3;
 }
 
-message RolloutAnalysisTemplate {
-  // TemplateName name of template to use in AnalysisRun
-  // +optional
-  optional string templateName = 1;
-
-  // Whether to look for the templateName at cluster scope or namespace scope
-  // +optional
-  optional bool clusterScope = 2;
-}
-
 // RolloutCondition describes the state of a rollout at a certain point.
 message RolloutCondition {
   // Type of deployment condition.
@@ -1267,6 +1372,16 @@ message RolloutExperimentStep {
   // +patchMergeKey=name
   // +patchStrategy=merge
   repeated RolloutExperimentStepAnalysisTemplateRef analyses = 3;
+
+  // DryRun object contains the settings for running the analysis in Dry-Run mode
+  // +patchMergeKey=metricName
+  // +patchStrategy=merge
+  // +optional
+  repeated DryRun dryRun = 4;
+
+  // AnalysisRunMetadata labels and annotations that will be added to the AnalysisRuns
+  // +optional
+  optional AnalysisRunMetadata analysisRunMetadata = 5;
 }
 
 message RolloutExperimentStepAnalysisTemplateRef {
@@ -1342,6 +1457,7 @@ message RolloutSpec {
   // selected by this will be the ones affected by this rollout.
   // It must match the pod template's labels.
   // +optional
+  // +kubebuilder:validation:XValidation:rule="self == oldSelf",message=".spec.selector is immutable"
   optional k8s.io.apimachinery.pkg.apis.meta.v1.LabelSelector selector = 2;
 
   // Template describes the pods that will be created.
@@ -1548,6 +1664,9 @@ message RolloutTrafficRouting {
   // +kubebuilder:validation:Type=object
   // Plugins holds specific configuration that traffic router plugins can use for routing traffic
   map<string, bytes> plugins = 10;
+
+  // MaxTrafficWeight The total weight of traffic. If unspecified, it defaults to 100
+  optional int32 maxTrafficWeight = 11;
 }
 
 message RouteMatch {
@@ -1613,6 +1732,14 @@ message SecretKeyRef {
   optional string key = 2;
 }
 
+message SecretRef {
+  // Name refers to the name of the secret that should be used to integrate with Datadog.
+  optional string name = 1;
+
+  // Namespaced indicates whether the secret is in the namespace where rollouts it installed or in the namespace where the metric was found
+  optional bool namespaced = 2;
+}
+
 // SetCanaryScale defines how to scale the newRS without changing traffic weight
 message SetCanaryScale {
   // Weight sets the percentage of replicas the newRS should have
@@ -1671,6 +1798,47 @@ message SkyWalkingMetric {
   optional string interval = 3;
 }
 
+message StepPluginStatus {
+  // Index is the matching step index of the executed plugin
+  optional int32 index = 1;
+
+  // Name is the matching step name of the executed plugin
+  optional string name = 2;
+
+  // Operation is the name of the operation that produced this status
+  optional string operation = 3;
+
+  // Phase is the resulting phase of the operation
+  optional string phase = 4;
+
+  // Message provides details on why the plugin is in its current phase
+  optional string message = 5;
+
+  // StartedAt indicates when the plugin was first called for the operation
+  optional k8s.io.apimachinery.pkg.apis.meta.v1.Time startedAt = 6;
+
+  // UpdatedAt indicates when the plugin was last called for the operation
+  optional k8s.io.apimachinery.pkg.apis.meta.v1.Time updatedAt = 7;
+
+  // FinishedAt indicates when the operation was completed
+  optional k8s.io.apimachinery.pkg.apis.meta.v1.Time finishedAt = 8;
+
+  // Backoff is a duration to wait before trying to execute the operation again if it was not completed
+  optional string backoff = 9;
+
+  // Executions is the number of time the operation was executed
+  optional int32 executions = 10;
+
+  // Disabled indicates if the plugin is globally disabled
+  optional bool disabled = 11;
+
+  // +kubebuilder:validation:Schemaless
+  // +kubebuilder:pruning:PreserveUnknownFields
+  // +kubebuilder:validation:Type=object
+  // Status holds the internal status of the plugin for this operation
+  optional bytes status = 12;
+}
+
 message StickinessConfig {
   optional bool enabled = 1;
 
@@ -1702,6 +1870,18 @@ message TLSRoute {
 
   // A list of all the SNI Hosts of the TLS Route desired to be matched in the given Istio VirtualService.
   repeated string sniHosts = 2;
+}
+
+// TTLStrategy defines the strategy for the time to live depending on if the analysis succeeded or failed
+message TTLStrategy {
+  // SecondsAfterCompletion is the number of seconds to live after completion.
+  optional int32 secondsAfterCompletion = 1;
+
+  // SecondsAfterFailure is the number of seconds to live after failure.
+  optional int32 secondsAfterFailure = 2;
+
+  // SecondsAfterSuccess is the number of seconds to live after success.
+  optional int32 secondsAfterSuccess = 3;
 }
 
 message TemplateService {
@@ -1847,6 +2027,10 @@ message WebMetric {
   // +kubebuilder:validation:Type=object
   // JSONBody is the body of the web metric in a json format (method must be POST/PUT)
   optional bytes jsonBody = 8;
+
+  // Authentication details
+  // +optional
+  optional Authentication authentication = 9;
 }
 
 message WebMetricHeader {

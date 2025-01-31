@@ -96,11 +96,12 @@ func NewCustomResourceDefinition() []*extensionsobj.CustomResourceDefinition {
 	// clean up stuff left by controller-gen
 	deleteFile("config/webhook/manifests.yaml")
 	deleteFile("config/webhook")
-	deleteFile("config/argoproj.io_analysisruns.yaml")
-	deleteFile("config/argoproj.io_analysistemplates.yaml")
-	deleteFile("config/argoproj.io_clusteranalysistemplates.yaml")
-	deleteFile("config/argoproj.io_experiments.yaml")
-	deleteFile("config/argoproj.io_rollouts.yaml")
+	deleteFile("config/crd/argoproj.io_analysisruns.yaml")
+	deleteFile("config/crd/argoproj.io_analysistemplates.yaml")
+	deleteFile("config/crd/argoproj.io_clusteranalysistemplates.yaml")
+	deleteFile("config/crd/argoproj.io_experiments.yaml")
+	deleteFile("config/crd/argoproj.io_rollouts.yaml")
+	deleteFile("config/crd")
 	deleteFile("config")
 
 	crds := []*extensionsobj.CustomResourceDefinition{}
@@ -322,6 +323,7 @@ var patchAnnotationKeys = map[string]bool{
 	"x-kubernetes-patch-strategy":  true,
 	"x-kubernetes-list-map-keys":   true,
 	"x-kubernetes-list-type":       true,
+	"x-kubernetes-map-type":        true,
 }
 
 // injectPatchAnnotations injects patch annotations from given schema definitions and drop properties that don't have
